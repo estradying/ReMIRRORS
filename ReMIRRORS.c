@@ -11,7 +11,7 @@
 #define THREADS 12
 #define BATCH_SIZE 1024
 #define B_SCALE (337.0 / 331.0)
-#define RING_RADIUS 512
+#define RING_RADIUS 576
 #define ALLOW_BROKEN_RINGS 0
 #define WRITE_TO_FILE 0
 #define FILE_PATH "ReMIRRORS-Output.txt"
