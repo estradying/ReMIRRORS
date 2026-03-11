@@ -6,7 +6,7 @@
 #include <stdatomic.h>
 #include "cubiomes/generator.h"
 #include "cubiomes/biomenoise.h"
-#include "cubiomes/ringchecker_step.h"
+#include "ringchecker_step.h"
 
 #define THREADS 12
 #define BATCH_SIZE 1024
