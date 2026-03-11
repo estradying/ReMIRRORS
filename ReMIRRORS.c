@@ -4,8 +4,8 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdatomic.h>
-#include "generator.h"
-#include "biomenoise.h"
+#include "cubiomes/generator.h"
+#include "cubiomes/biomenoise.h"
 #include "ringchecker_step.h"
 
 #define THREADS 12
@@ -37,9 +37,8 @@ typedef struct
 } Points;
 
 static const int order[4] =
-{
-    0, 2, 1, 3
-};
+    {
+        0, 2, 1, 3};
 
 static double dx[12];
 static double dz[12];
