@@ -9,7 +9,7 @@ const int large = 0;
 const int biome_scale = 4;
 
 #ifndef MOCK_MOOSHROOM
-int is_mushroom(BiomeNoise *bn, int x, int z, double threshhold)
+int is_mooshroom(BiomeNoise *bn, int x, int z, double threshhold)
 {
     double cont = sampleClimatePara(bn, NULL, (double)x / biome_scale,
                                     (double)z / biome_scale);
