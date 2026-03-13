@@ -2,32 +2,13 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <pthread.h>
+#include <inttypes.h>
 #include <stdatomic.h>
-#include "generator.h"
-#include "biomenoise.h"
-#include "ringchecker_step.h"
 
-#define THREADS 12
-#define BATCH_SIZE 1024
-#define B_SCALE (337.0 / 331.0)
-#define RING_RADIUS 576
-#define ALLOW_BROKEN_RINGS 0
-#define WRITE_TO_FILE 0
-#define FILE_PATH "ReMIRRORS-Output.txt"
-
-#define COARSE_RADIUS 4096
-#define COARSE_STEP 1024
-#define MID_RADIUS 256
-#define MID_STEP 64
-#define FINE_RADIUS 128
-#define FINE_STEP 32
-#define ISLAND_SEARCH_RADIUS 32
-#define LATTICE_RADIUS 7471104
-#define LATTICE_STEP 131072
-
-static FILE *f = NULL;
-static atomic_long next_seed = 0;
+#include "cubiomes/generator.h"
+#include "cubiomes/biomenoise.h"
 
 typedef struct
 {
@@ -36,17 +17,15 @@ typedef struct
     double score;
 } Points;
 
-static const int order[4] =
-{
-    0, 2, 1, 3
-};
+static atomic_uint_least64_t next_seed = 0;
+static const int order[4] = {0, 2, 1, 3};
 
 static double dx[12];
 static double dz[12];
 static double dx_b[12];
 static double dz_b[12];
 
-static void print_separator()
+static void print_separator(void)
 {
     for (int i = 0; i < 64; i++)
     {
@@ -56,12 +35,14 @@ static void print_separator()
     printf("\n");
 }
 
-static void print_result(long seed, int x, int z)
+static void print_result(uint64_t seed, int x, int z)
 {
-    int used = printf("[Seed: %ld]", seed);
+    int used = printf("[Seed: %" PRId64 "]", (int64_t)seed);
     int length = snprintf(NULL, 0, "[X: %d Z: %d]", x, z);
 
     printf("%*s[X: %d Z: %d]\n", 64 - used - length, " ", x, z);
+
+    print_separator();
 }
 
 static void map(Generator *g, int ref_x, int ref_z)
@@ -94,6 +75,69 @@ static void map(Generator *g, int ref_x, int ref_z)
 
         printf(" ]\n");
     }
+
+    print_separator();
+}
+
+static int surrounded(Generator *g, int ref_x, int ref_z)
+{
+    int visited[128][128] = {0};
+    int stack_x[16384];
+    int stack_z[16384];
+    int sp = 0;
+
+    ref_x /= 4;
+    ref_z /= 4;
+
+    stack_x[sp] = ref_x;
+    stack_z[sp] = ref_z;
+    sp++;
+
+    while (sp > 0)
+    {
+        sp--;
+
+        int sx = stack_x[sp];
+        int sz = stack_z[sp];
+
+        int vx = sx - ref_x + 64;
+        int vz = sz - ref_z + 64;
+
+        if (vx < 0 || vz < 0 || vx >= 128 || vz >= 128)
+        {
+            return 0;
+        }
+
+        if (visited[vz][vx])
+        {
+            continue;
+        }
+
+        visited[vz][vx] = 1;
+
+        if (sampleClimatePara(&g->bn, NULL, sx * 4, sz * 4) < -1.05)
+        {
+            continue;
+        }
+
+        stack_x[sp] = sx + 1;
+        stack_z[sp] = sz;
+        sp++;
+
+        stack_x[sp] = sx - 1;
+        stack_z[sp] = sz;
+        sp++;
+
+        stack_x[sp] = sx;
+        stack_z[sp] = sz + 1;
+        sp++;
+
+        stack_x[sp] = sx;
+        stack_z[sp] = sz - 1;
+        sp++;
+    }
+
+    return 1;
 }
 
 static int ring_a(OctaveNoise *noise, double factor, int ref_x, int ref_z, Points *p)
@@ -113,8 +157,8 @@ static int ring_a(OctaveNoise *noise, double factor, int ref_x, int ref_z, Point
 
 static int ring_b(OctaveNoise *noise, double factor, int ref_x, int ref_z, Points *p)
 {
-    double cx = ref_x * B_SCALE;
-    double cz = ref_z * B_SCALE;
+    double cx = ref_x * (337.0 / 331.0);
+    double cz = ref_z * (337.0 / 331.0);
 
     double center = sampleOctave(noise, cx, 0, cz) * factor;
 
@@ -136,22 +180,22 @@ static int ring_b(OctaveNoise *noise, double factor, int ref_x, int ref_z, Point
     return 1;
 }
 
-static void check(Generator *g, long seed)
+static void check(Generator *g, uint64_t seed)
 {
     setClimateParaSeed(&g->bn, seed, 0, NP_CONTINENTALNESS, 1);
 
-    for (int x1 = -COARSE_RADIUS; x1 <= COARSE_RADIUS; x1 += COARSE_STEP)
+    for (int x1 = -4096; x1 <= 4096; x1 += 1024)
     {
-        for (int z1 = -COARSE_RADIUS; z1 <= COARSE_RADIUS; z1 += COARSE_STEP)
+        for (int z1 = -4096; z1 <= 4096; z1 += 1024)
         {
             if (sampleClimatePara(&g->bn, NULL, x1, z1) > -0.4)
             {
                 continue;
             }
 
-            for (int x2 = x1 - MID_RADIUS; x2 <= x1 + MID_RADIUS; x2 += MID_STEP)
+            for (int x2 = x1 - 256; x2 <= x1 + 256; x2 += 64)
             {
-                for (int z2 = z1 - MID_RADIUS; z2 <= z1 + MID_RADIUS; z2 += MID_STEP)
+                for (int z2 = z1 - 256; z2 <= z1 + 256; z2 += 64)
                 {
                     if (sampleClimatePara(&g->bn, NULL, x2, z2) > -0.6)
                     {
@@ -171,9 +215,9 @@ static void check(Generator *g, long seed)
                     int best_x = 0;
                     int best_z = 0;
 
-                    for (int x3 = x2 - FINE_RADIUS; x3 <= x2 + FINE_RADIUS; x3 += FINE_STEP)
+                    for (int x3 = x2 - 128; x3 <= x2 + 128; x3 += 32)
                     {
-                        for (int z3 = z2 - FINE_RADIUS; z3 <= z2 + FINE_RADIUS; z3 += FINE_STEP)
+                        for (int z3 = z2 - 128; z3 <= z2 + 128; z3 += 32)
                         {
                             double c = sampleOctave(oct_a, x3, 0, z3) * factor;
 
@@ -201,9 +245,9 @@ static void check(Generator *g, long seed)
                         return;
                     }
 
-                    for (int x4 = best_x - LATTICE_RADIUS; x4 <= best_x + LATTICE_RADIUS; x4 += LATTICE_STEP)
+                    for (int x4 = best_x - 7471104; x4 <= best_x + 7471104; x4 += 131072)
                     {
-                        for (int z4 = best_z - LATTICE_RADIUS; z4 <= best_z + LATTICE_RADIUS; z4 += LATTICE_STEP)
+                        for (int z4 = best_z - 7471104; z4 <= best_z + 7471104; z4 += 131072)
                         {
                             if (!ring_b(oct_b, factor, x4, z4, &best))
                             {
@@ -214,9 +258,9 @@ static void check(Generator *g, long seed)
 
                             double max = -1.0;
 
-                            for (int x5 = x4 - ISLAND_SEARCH_RADIUS; x5 <= x4 + ISLAND_SEARCH_RADIUS; x5++)
+                            for (int x5 = x4 - 32; x5 <= x4 + 32; x5++)
                             {
-                                for (int z5 = z4 - ISLAND_SEARCH_RADIUS; z5 <= z4 + ISLAND_SEARCH_RADIUS; z5++)
+                                for (int z5 = z4 - 32; z5 <= z4 + 32; z5++)
                                 {
                                     double c = sampleClimatePara(&g->bn, NULL, x5, z5);
 
@@ -227,23 +271,10 @@ static void check(Generator *g, long seed)
                                 }
                             }
 
-                            if (max > -0.19)
+                            if (max > -0.19 && surrounded(g, x4, z4))
                             {
-                                if (ALLOW_BROKEN_RINGS || is_surrounded(&g->bn, x4 * 4, z4 * 4, 16, -1.05))
-                                {
-                                    if (WRITE_TO_FILE)
-                                    {
-                                        fprintf(f, "%ld;%d;%d\n", seed, x4 * 4, z4 * 4);
-                                        fflush(f);
-                                    }
-                                    else
-                                    {
-                                        print_result(seed, x4 * 4, z4 * 4);
-                                        print_separator();
-                                        map(g, x4, z4);
-                                        print_separator();
-                                    }
-                                }
+                                print_result(seed, x4 * 4, z4 * 4);
+                                map(g, x4, z4);
                             }
 
                             setClimateParaSeed(&g->bn, seed, 0, NP_CONTINENTALNESS, 8);
@@ -265,10 +296,10 @@ static void *worker(void *arg)
 
     for (;;)
     {
-        long start = atomic_fetch_add(&next_seed, BATCH_SIZE);
-        long end = start + BATCH_SIZE;
+        uint64_t start = atomic_fetch_add(&next_seed, 1024);
+        uint64_t end = start + 1024;
 
-        for (long seed = start; seed < end; seed++)
+        for (uint64_t seed = start; seed < end; seed++)
         {
             check(&g, seed);
         }
@@ -277,10 +308,10 @@ static void *worker(void *arg)
     return NULL;
 }
 
-static void precompute_offsets()
+static void precompute_offsets(void)
 {
     double pi = acos(-1.0);
-    double scaled_radius = RING_RADIUS / 4.0;
+    double scaled_radius = 576 / 4.0;
 
     for (int i = 0; i < 3; i++)
     {
@@ -297,60 +328,36 @@ static void precompute_offsets()
             dx[base + j] = x;
             dz[base + j] = z;
 
-            dx_b[base + j] = x * B_SCALE;
-            dz_b[base + j] = z * B_SCALE;
+            dx_b[base + j] = x * (337.0 / 331.0);
+            dz_b[base + j] = z * (337.0 / 331.0);
         }
     }
-
-    print_separator();
-    printf("[Precomputed ring point offsets for radius %d]\n", RING_RADIUS);
-    print_separator();
-
-    int length = snprintf(NULL, 0, "[X: %6.1f Z: %6.1f]", 0.0, 0.0);
-
-    for (int i = 0; i < 12; i++)
-    {
-        double x = dx[i] * 4.0;
-        double z = dz[i] * 4.0;
-
-        printf("[%2d]", i + 1);
-        printf("%*s[X: %6.1f Z: %6.1f]\n", 60 - length, " ", x, z);
-    }
-
-    print_separator();
 }
 
 int main(void)
 {
-    if (WRITE_TO_FILE)
-    {
-        f = fopen(FILE_PATH, "a");
+    srand((unsigned int)time(NULL));
 
-        if (!f)
-        {
-            return 1;
-        }
-    }
+    uint64_t seed = ((uint64_t)(rand() & 0xFFFF)) << 48;
+
+    atomic_store(&next_seed, seed);
+
+    print_separator();
+    printf("[Searching from seed %" PRId64 " with 12 threads]\n", (int64_t)seed);
+    print_separator();
 
     precompute_offsets();
 
-    next_seed = (long)time(NULL) << 32;
+    pthread_t threads[12];
 
-    pthread_t threads[THREADS];
-
-    for (int i = 0; i < THREADS; i++)
+    for (int i = 0; i < 12; i++)
     {
         pthread_create(&threads[i], NULL, worker, NULL);
     }
 
-    for (int i = 0; i < THREADS; i++)
+    for (int i = 0; i < 12; i++)
     {
         pthread_join(threads[i], NULL);
-    }
-
-    if (f)
-    {
-        fclose(f);
     }
 
     return 0;
