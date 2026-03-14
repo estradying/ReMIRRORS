@@ -2,7 +2,10 @@
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 #include <stdint.h>
+#include <getopt.h>
 #include <pthread.h>
 #include <inttypes.h>
 #include <stdatomic.h>
@@ -20,10 +23,37 @@ typedef struct
 static atomic_uint_least64_t next_seed = 0;
 static const int order[4] = {0, 2, 1, 3};
 
+static int num_threads = 12;
+static int64_t g_end_seed = -1;
+
 static double dx[12];
 static double dz[12];
 static double dx_b[12];
 static double dz_b[12];
+
+static void print_usage(const char *prog)
+{
+    printf("Usage: %s [ACTION] [OPTIONS]\n", prog);
+    printf("\n");
+    printf("Searches for Mushroom Island ring patterns in Minecraft seeds.\n");
+    printf("\n");
+    printf("Actions:\n");
+    printf("  search    Search for seeds (default)\n");
+    printf("  help      Show this help message\n");
+    printf("\n");
+    printf("Options:\n");
+    printf("  -t, --threads <N>       Number of worker threads (default: 12)\n");
+    printf("  -s, --start-seed <N>    Starting seed (default: random)\n");
+    printf("  -e, --end-seed <N>      End seed for a finite search range\n");
+    printf("  -h, --help              Show this help message\n");
+    printf("\n");
+    printf("Examples:\n");
+    printf("  %s                          Search from a random seed with 12 threads\n", prog);
+    printf("  %s search -t 8              Search with 8 threads\n", prog);
+    printf("  %s search -s 12345          Start searching from seed 12345\n", prog);
+    printf("  %s search -s 0 -e 1000000   Search seeds 0 through 1000000\n", prog);
+    printf("  %s search -t 4 -s 99 -e 999  Search with 4 threads, seeds 99 through 999\n", prog);
+}
 
 static void print_separator(void)
 {
@@ -297,7 +327,18 @@ static void *worker(void *arg)
     for (;;)
     {
         uint64_t start = atomic_fetch_add(&next_seed, 1024);
+
+        if (g_end_seed >= 0 && start > (uint64_t)g_end_seed)
+        {
+            break;
+        }
+
         uint64_t end = start + 1024;
+
+        if (g_end_seed >= 0 && end > (uint64_t)g_end_seed + 1)
+        {
+            end = (uint64_t)g_end_seed + 1;
+        }
 
         for (uint64_t seed = start; seed < end; seed++)
         {
@@ -334,31 +375,159 @@ static void precompute_offsets(void)
     }
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
-    srand((unsigned int)time(NULL));
+    static const struct option long_opts[] = {
+        {"threads",    required_argument, NULL, 't'},
+        {"start-seed", required_argument, NULL, 's'},
+        {"end-seed",   required_argument, NULL, 'e'},
+        {"help",       no_argument,       NULL, 'h'},
+        {NULL,         0,                 NULL,  0 }
+    };
 
-    uint64_t seed = ((uint64_t)(rand() & 0xFFFF)) << 48;
+    /* Handle optional leading action word before option parsing */
+    int arg_offset = 1;
+
+    if (argc > 1 && argv[1][0] != '-')
+    {
+        if (strcmp(argv[1], "help") == 0)
+        {
+            print_usage(argv[0]);
+            return 0;
+        }
+        else if (strcmp(argv[1], "search") == 0)
+        {
+            arg_offset = 2;
+        }
+        else
+        {
+            fprintf(stderr, "Unknown action: %s\n\n", argv[1]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    /* Shift argv so getopt sees only the relevant arguments */
+    int opt_argc = argc - arg_offset + 1;
+    char **opt_argv = argv + arg_offset - 1;
+    opt_argv[0] = argv[0];
+
+    int64_t start_seed = -1;
+    int opt;
+
+    while ((opt = getopt_long(opt_argc, opt_argv, "t:s:e:h", long_opts, NULL)) != -1)
+    {
+        switch (opt)
+        {
+            case 't':
+            {
+                char *endptr;
+                errno = 0;
+                long val = strtol(optarg, &endptr, 10);
+
+                if (errno != 0 || *endptr != '\0' || val < 1 || val > 256)
+                {
+                    fprintf(stderr, "Error: --threads must be an integer between 1 and 256\n");
+                    return 1;
+                }
+
+                num_threads = (int)val;
+                break;
+            }
+
+            case 's':
+            {
+                char *endptr;
+                errno = 0;
+                start_seed = strtoll(optarg, &endptr, 10);
+
+                if (errno != 0 || *endptr != '\0')
+                {
+                    fprintf(stderr, "Error: --start-seed must be a valid integer\n");
+                    return 1;
+                }
+
+                break;
+            }
+
+            case 'e':
+            {
+                char *endptr;
+                errno = 0;
+                g_end_seed = strtoll(optarg, &endptr, 10);
+
+                if (errno != 0 || *endptr != '\0')
+                {
+                    fprintf(stderr, "Error: --end-seed must be a valid integer\n");
+                    return 1;
+                }
+
+                break;
+            }
+
+            case 'h':
+                print_usage(argv[0]);
+                return 0;
+
+            default:
+                print_usage(argv[0]);
+                return 1;
+        }
+    }
+
+    /* Determine starting seed */
+    uint64_t seed;
+
+    if (start_seed >= 0)
+    {
+        seed = (uint64_t)start_seed;
+    }
+    else
+    {
+        srand((unsigned int)time(NULL));
+        seed = ((uint64_t)(rand() & 0xFFFF)) << 48;
+    }
+
+    if (g_end_seed >= 0 && (int64_t)seed > g_end_seed)
+    {
+        fprintf(stderr, "Error: --start-seed must be less than or equal to --end-seed\n");
+        return 1;
+    }
 
     atomic_store(&next_seed, seed);
 
     print_separator();
-    printf("[Searching from seed %" PRId64 " with 12 threads]\n", (int64_t)seed);
+    printf("[Searching from seed %" PRId64 " with %d threads]\n",
+           (int64_t)seed, num_threads);
+
+    if (g_end_seed >= 0)
+    {
+        printf("[End seed: %" PRId64 "]\n", g_end_seed);
+    }
+
     print_separator();
 
     precompute_offsets();
 
-    pthread_t threads[12];
+    pthread_t *threads = malloc((size_t)num_threads * sizeof(pthread_t));
 
-    for (int i = 0; i < 12; i++)
+    if (!threads)
+    {
+        fprintf(stderr, "Error: failed to allocate thread array\n");
+        return 1;
+    }
+
+    for (int i = 0; i < num_threads; i++)
     {
         pthread_create(&threads[i], NULL, worker, NULL);
     }
 
-    for (int i = 0; i < 12; i++)
+    for (int i = 0; i < num_threads; i++)
     {
         pthread_join(threads[i], NULL);
     }
+
+    free(threads);
 
     return 0;
 }
